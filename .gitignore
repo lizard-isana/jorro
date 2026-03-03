@@ -1,0 +1,9 @@
+.DS_Store
+dist/
+jorro
+jorro.exe
+jorro_windows.exe
+jorro.app/
+*.log
+zz_jorro_windows_amd64.syso
+src/zz_jorro_windows_amd64.syso
