@@ -7,16 +7,31 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const hotReloadEventsPath = "/__jorro/events"
 
-func newSecureHandler(root string, allowExtensions map[string]struct{}, hotReload *hotReloadHub) (http.Handler, error) {
+var htmlIncludeDirectivePattern = regexp.MustCompile(`<!--\s*#include\s+(file|virtual)="([^"\r\n]+)"\s*-->`)
+
+type htmlIncludeConfig struct {
+	Enabled  bool
+	MaxDepth int
+}
+
+func newSecureHandler(root string, allowExtensions map[string]struct{}, indexFile string, hotReload *hotReloadHub, includeCfg htmlIncludeConfig) (http.Handler, error) {
 	baseRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
+	}
+	if includeCfg.MaxDepth < 1 {
+		includeCfg.MaxDepth = defaultHTMLIncludeDepth
+	}
+	indexFile, err = normalizeIndexFile(indexFile)
+	if err != nil {
+		return nil, fmt.Errorf("invalid index file: %w", err)
 	}
 
 	rootInfo, err := os.Stat(baseRoot)
@@ -34,6 +49,10 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, hotReloa
 	}
 
 	fileHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		notFound := func() {
+			serveNotFoundPage(w, r, baseRoot)
+		}
+
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -43,9 +62,17 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, hotReloa
 			return
 		}
 
-		cleanURLPath := path.Clean("/" + r.URL.Path)
+		rawURLPath := r.URL.Path
+		if rawURLPath == "" {
+			rawURLPath = "/"
+		}
+		cleanURLPath := path.Clean(rawURLPath)
+		if !strings.HasPrefix(cleanURLPath, "/") {
+			cleanURLPath = "/" + cleanURLPath
+		}
+		hasTrailingSlash := strings.HasSuffix(rawURLPath, "/")
 		if hasHiddenPathSegment(cleanURLPath) {
-			http.NotFound(w, r)
+			notFound()
 			return
 		}
 
@@ -54,15 +81,24 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, hotReloa
 
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			http.NotFound(w, r)
+			notFound()
 			return
 		}
 
 		if info.IsDir() {
-			indexPath := filepath.Join(fullPath, "index.html")
+			if !hasTrailingSlash {
+				target := cleanURLPath + "/"
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+				return
+			}
+
+			indexPath := filepath.Join(fullPath, indexFile)
 			indexInfo, err := os.Stat(indexPath)
 			if err != nil || indexInfo.IsDir() {
-				http.NotFound(w, r)
+				notFound()
 				return
 			}
 			fullPath = indexPath
@@ -73,20 +109,20 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, hotReloa
 			resolvedPath = evalPath
 		} else {
 			if hasSymlinkInPath(baseRoot, fullPath) {
-				http.NotFound(w, r)
+				notFound()
 				return
 			}
 		}
 		if !isUnderBase(baseRoot, resolvedPath) {
-			http.NotFound(w, r)
+			notFound()
 			return
 		}
 		if !isAllowedExtension(resolvedPath, allowExtensions) {
-			http.NotFound(w, r)
+			notFound()
 			return
 		}
-		if hotReload != nil && strings.EqualFold(filepath.Ext(resolvedPath), ".html") {
-			serveHTMLWithHotReload(w, r, resolvedPath)
+		if strings.EqualFold(filepath.Ext(resolvedPath), ".html") {
+			serveHTMLWithTransforms(w, r, resolvedPath, baseRoot, allowExtensions, hotReload != nil, includeCfg)
 			return
 		}
 
@@ -134,13 +170,18 @@ func serveHotReloadEvents(w http.ResponseWriter, r *http.Request, hub *hotReload
 	}
 }
 
-func serveHTMLWithHotReload(w http.ResponseWriter, r *http.Request, filePath string) {
+func serveHTMLWithTransforms(w http.ResponseWriter, r *http.Request, filePath, baseRoot string, allowExtensions map[string]struct{}, hotReload bool, includeCfg htmlIncludeConfig) {
 	body, err := os.ReadFile(filePath)
 	if err != nil {
-		http.NotFound(w, r)
+		serveNotFoundPage(w, r, baseRoot)
 		return
 	}
-	body = injectHotReloadScript(body)
+	if includeCfg.Enabled {
+		body = renderHTMLIncludes(body, filePath, baseRoot, allowExtensions, includeCfg.MaxDepth)
+	}
+	if hotReload {
+		body = injectHotReloadScript(body)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if r.Method == http.MethodHead {
@@ -148,6 +189,153 @@ func serveHTMLWithHotReload(w http.ResponseWriter, r *http.Request, filePath str
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func renderHTMLIncludes(body []byte, filePath, baseRoot string, allowExtensions map[string]struct{}, maxDepth int) []byte {
+	stack := map[string]struct{}{
+		filePath: {},
+	}
+	return renderHTMLIncludesRecursive(body, filePath, baseRoot, allowExtensions, maxDepth, stack)
+}
+
+func renderHTMLIncludesRecursive(body []byte, parentFilePath, baseRoot string, allowExtensions map[string]struct{}, remainingDepth int, stack map[string]struct{}) []byte {
+	matches := htmlIncludeDirectivePattern.FindAllSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		return body
+	}
+
+	out := make([]byte, 0, len(body))
+	last := 0
+	for _, m := range matches {
+		out = append(out, body[last:m[0]]...)
+		includeKind := strings.TrimSpace(string(body[m[2]:m[3]]))
+		includePath := strings.TrimSpace(string(body[m[4]:m[5]]))
+
+		if remainingDepth < 1 {
+			out = append(out, includeErrorComment("max include depth exceeded")...)
+			last = m[1]
+			continue
+		}
+
+		includeBody, resolvedIncludePath, err := readIncludeFile(includeKind, includePath, parentFilePath, baseRoot, allowExtensions)
+		if err != nil {
+			out = append(out, includeErrorComment(err.Error())...)
+			last = m[1]
+			continue
+		}
+		if _, exists := stack[resolvedIncludePath]; exists {
+			out = append(out, includeErrorComment("cyclic include detected")...)
+			last = m[1]
+			continue
+		}
+
+		stack[resolvedIncludePath] = struct{}{}
+		includeBody = renderHTMLIncludesRecursive(includeBody, resolvedIncludePath, baseRoot, allowExtensions, remainingDepth-1, stack)
+		delete(stack, resolvedIncludePath)
+
+		out = append(out, includeBody...)
+		last = m[1]
+	}
+	out = append(out, body[last:]...)
+	return out
+}
+
+func readIncludeFile(includeKind, includeRef, parentFilePath, baseRoot string, allowExtensions map[string]struct{}) ([]byte, string, error) {
+	ref := strings.TrimSpace(includeRef)
+	if ref == "" {
+		return nil, "", fmt.Errorf("include path is empty")
+	}
+	if strings.ContainsAny(ref, "?#") {
+		return nil, "", fmt.Errorf("include path must not contain query or fragment: %s", ref)
+	}
+
+	unified := strings.ReplaceAll(ref, "\\", "/")
+	cleanRef := path.Clean(unified)
+	var candidate string
+	switch includeKind {
+	case "file":
+		if strings.HasPrefix(cleanRef, "/") {
+			return nil, "", fmt.Errorf("absolute include path is not allowed")
+		}
+		if cleanRef == "." || cleanRef == ".." {
+			return nil, "", fmt.Errorf("invalid include path")
+		}
+		if hasHiddenIncludePathSegment(cleanRef) {
+			return nil, "", fmt.Errorf("hidden include path is not allowed: %s", ref)
+		}
+		candidate = filepath.Join(filepath.Dir(parentFilePath), filepath.FromSlash(cleanRef))
+	case "virtual":
+		if !strings.HasPrefix(cleanRef, "/") {
+			return nil, "", fmt.Errorf("virtual include path must start with /: %s", ref)
+		}
+		relRef := strings.TrimPrefix(cleanRef, "/")
+		if hasHiddenIncludePathSegment(relRef) {
+			return nil, "", fmt.Errorf("hidden include path is not allowed: %s", ref)
+		}
+		candidate = filepath.Join(baseRoot, filepath.FromSlash(relRef))
+	default:
+		return nil, "", fmt.Errorf("unsupported include type: %s", includeKind)
+	}
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return nil, "", fmt.Errorf("include not found: %s", ref)
+	}
+	if info.IsDir() {
+		return nil, "", fmt.Errorf("include target is a directory: %s", ref)
+	}
+
+	resolved := candidate
+	if evalPath, err := filepath.EvalSymlinks(candidate); err == nil {
+		resolved = evalPath
+	} else if hasSymlinkInPath(baseRoot, candidate) {
+		return nil, "", fmt.Errorf("include via symlink is not allowed: %s", ref)
+	}
+	if !isUnderBase(baseRoot, resolved) {
+		return nil, "", fmt.Errorf("include outside root is not allowed: %s", ref)
+	}
+	if !isAllowedExtension(resolved, allowExtensions) {
+		return nil, "", fmt.Errorf("include extension is not allowed: %s", ref)
+	}
+
+	body, err := os.ReadFile(resolved)
+	if err != nil {
+		return nil, "", fmt.Errorf("include read failed: %s", ref)
+	}
+	return body, resolved, nil
+}
+
+func includeErrorComment(reason string) []byte {
+	clean := strings.TrimSpace(reason)
+	clean = strings.ReplaceAll(clean, "\r", " ")
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	clean = strings.ReplaceAll(clean, "--", " ")
+	clean = strings.Join(strings.Fields(clean), " ")
+	if clean == "" {
+		clean = "include failed"
+	}
+	return []byte("<!-- jorro-include-error: " + clean + " -->")
+}
+
+func serveNotFoundPage(w http.ResponseWriter, r *http.Request, baseRoot string) {
+	customPath := filepath.Join(baseRoot, "404.html")
+	info, err := os.Stat(customPath)
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	body, err := os.ReadFile(customPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	if r.Method == http.MethodHead {
+		return
+	}
 	_, _ = w.Write(body)
 }
 
@@ -176,6 +364,18 @@ func injectHotReloadScript(html []byte) []byte {
 func hasHiddenPathSegment(p string) bool {
 	for _, seg := range strings.Split(p, "/") {
 		if seg == "" || seg == "." {
+			continue
+		}
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHiddenIncludePathSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
 			continue
 		}
 		if strings.HasPrefix(seg, ".") {

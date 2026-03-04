@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 )
 
-const hotReloadPollInterval = 800 * time.Millisecond
+var hotReloadPollInterval = 800 * time.Millisecond
+
+var hotReloadDebounceWindow = 500 * time.Millisecond
 
 type fileFingerprint struct {
 	size    int64
@@ -58,10 +61,15 @@ func (h *hotReloadHub) Publish() {
 	h.mu.Unlock()
 }
 
-func startHotReloadWatcher(root string, allowExtensions map[string]struct{}, onChange func()) (func(), error) {
-	prev, err := scanServedFiles(root, allowExtensions)
-	if err != nil {
-		return nil, err
+func (h *hotReloadHub) HasSubscribers() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subscribers) > 0
+}
+
+func startHotReloadWatcher(root string, watchExtensions map[string]struct{}, hasSubscribers func() bool, onChange func()) (func(), error) {
+	if isLikelyNetworkPath(root) {
+		return nil, fmt.Errorf("hot reload is disabled for network paths: %s", root)
 	}
 
 	stopCh := make(chan struct{})
@@ -72,18 +80,42 @@ func startHotReloadWatcher(root string, allowExtensions map[string]struct{}, onC
 		defer close(done)
 		ticker := time.NewTicker(hotReloadPollInterval)
 		defer ticker.Stop()
+		prev := make(map[string]fileFingerprint)
+		initialized := false
+		var pending bool
+		var lastChangeAt time.Time
 
 		for {
 			select {
 			case <-stopCh:
 				return
-			case <-ticker.C:
-				next, err := scanServedFiles(root, allowExtensions)
+			case now := <-ticker.C:
+				if hasSubscribers != nil && !hasSubscribers() {
+					pending = false
+					initialized = false
+					continue
+				}
+				if !initialized {
+					initial, err := scanWatchedFiles(root, watchExtensions)
+					if err != nil {
+						continue
+					}
+					prev = initial
+					initialized = true
+					continue
+				}
+
+				next, err := scanWatchedFiles(root, watchExtensions)
 				if err != nil {
 					continue
 				}
 				if !sameSnapshot(prev, next) {
 					prev = next
+					pending = true
+					lastChangeAt = now
+				}
+				if pending && now.Sub(lastChangeAt) >= hotReloadDebounceWindow {
+					pending = false
 					onChange()
 				}
 			}
@@ -99,7 +131,16 @@ func startHotReloadWatcher(root string, allowExtensions map[string]struct{}, onC
 	return stop, nil
 }
 
-func scanServedFiles(root string, allowExtensions map[string]struct{}) (map[string]fileFingerprint, error) {
+func isLikelyNetworkPath(root string) bool {
+	clean := filepath.Clean(root)
+	vol := filepath.VolumeName(clean)
+	if strings.HasPrefix(vol, `\\`) {
+		return true
+	}
+	return strings.HasPrefix(clean, `\\`) || strings.HasPrefix(clean, "//")
+}
+
+func scanWatchedFiles(root string, watchExtensions map[string]struct{}) (map[string]fileFingerprint, error) {
 	files := make(map[string]fileFingerprint, 64)
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -123,7 +164,7 @@ func scanServedFiles(root string, allowExtensions map[string]struct{}) (map[stri
 		if d.IsDir() {
 			return nil
 		}
-		if !isAllowedExtension(path, allowExtensions) {
+		if !isAllowedExtension(path, watchExtensions) {
 			return nil
 		}
 

@@ -3,6 +3,11 @@
 `127.0.0.1` のみで待ち受けるローカル専用のミニマムな静的Webサーバです。  
 実行ファイルを置いたディレクトリをドキュメントルートとして配信します。
 
+## 注意事項
+
+- Jorro は公開サーバ用途ではなく、ローカル確認・開発中の動作確認を意図したツールです
+- `127.0.0.1` バインドのため外部公開リスクは低い設計ですが、誤配布や誤公開を避けるため、サーバ上の公開ディレクトリにはアップロードしないでください
+
 ## Download
 https://github.com/lizard-isana/jorro/releases/
 
@@ -34,17 +39,31 @@ https://github.com/lizard-isana/jorro/releases/
 ```json
 {
   "port": 8080,
+  "indexFile": "index.html",
   "allowExtensions": [".html", ".css", ".js", ".md", ".json"],
-  "hotReload": false
+  "hotReload": false,
+  "hotReloadWatchExtensions": [".html", ".css", ".js"],
+  "htmlInclude": false,
+  "htmlIncludeMaxDepth": 1
 }
 ```
 
 設定ルール:
 
 - `jorro-config.json` が存在しない: デフォルト設定を使用
+- 未知の設定キーがある: 起動時にエラー（設定ミスを防ぐため）
+- `indexFile` が存在する: ディレクトリアクセス時の既定ファイル名を上書き（デフォルト: `index.html`）
+- 起動時にルート直下の `indexFile` が見つからない場合は警告を表示
 - `allowExtensions` が存在する: その拡張子のみ配信
 - `allowExtensions` が存在しない: デフォルト拡張子を使用
 - `hotReload: true`: HTMLに開発用スクリプトを動的挿入し、変更時に自動リロード
+- `hotReloadWatchExtensions` が存在する: ホットリロード変更検知の拡張子を上書き（デフォルト: `.html/.css/.js`）
+- ホットリロードは短いデバウンスを行い、保存直後の連続リロードを抑制
+- ネットワークドライブ/UNC パスなどでは、ホットリロードが自動的に無効化される場合がある
+- `htmlInclude: true`: HTML内の固定記法を展開（`<!--#include file="relative/path.html"-->` または `<!--#include virtual="/path/from/root.html"-->`）
+- `htmlIncludeMaxDepth` が存在する: includeの最大深さを上書き（デフォルト: `1`、許容範囲: `1..16`）
+- include失敗時はレスポンスをエラーにせず `<!-- jorro-include-error: ... -->` コメントを埋め込む
+- include対象は配信ルート配下のみ（絶対パス/ルート外/隠しパス/不許可拡張子/シンボリックリンク逸脱は拒否）
 
 デフォルト拡張子:
 
@@ -54,7 +73,8 @@ https://github.com/lizard-isana/jorro/releases/
 
 - `GET` / `HEAD` 以外は拒否
 - ドット始まりパス（例: `.env`, `.git`）は非公開
-- ディレクトリ一覧は無効（`index.html` がないディレクトリは `404`）
+- ディレクトリ一覧は無効（`indexFile` に該当するファイルがないディレクトリは `404`）
+- ルートに `404.html` がある場合、`404` 応答でその内容を返す
 - ルート外へ抜けるシンボリックリンクを遮断
 - `Cache-Control: no-store` を付与
 - ポートは `8080` から探索し、競合時は自動フォールバック
@@ -95,6 +115,8 @@ Console版:
 ./scripts/build-console.sh
 ```
 
+※ これらのスクリプトは配布向けに `-trimpath` と `-ldflags "-s -w"` を付けてビルドします。
+
 macOSアプリ版:
 
 ```bash
@@ -132,4 +154,3 @@ GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui" -o ./dist/jorro.exe 
 ```bash
 go test ./...
 ```
-

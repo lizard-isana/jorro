@@ -13,6 +13,6 @@ fi
 
 mkdir -p "$DIST_DIR"
 
-go build -o "$DIST_DIR/$BIN_NAME" "$SRC_DIR"
+go build -trimpath -ldflags "-s -w" -o "$DIST_DIR/$BIN_NAME" "$SRC_DIR"
 
 echo "Built: $DIST_DIR/$BIN_NAME"

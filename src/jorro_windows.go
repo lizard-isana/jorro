@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +30,7 @@ const (
 	cwUseDefault       = 0x80000000
 	swShowDefault      = 10
 	mbIconError        = 0x00000010
+	mbIconWarning      = 0x00000030
 	idiApplication     = 32512
 	idOpenURL          = 1001
 	idQuit             = 1002
@@ -98,15 +101,18 @@ func main() {
 		showError("jorro", fmt.Sprintf("Error loading config: %v", err))
 		return
 	}
+	if indexPath, ok := rootIndexFilePath(root, cfg.IndexFile); !ok {
+		showWarning("jorro", fmt.Sprintf("Configured index file was not found:\n%s\n\nAccessing / may return 404 until it exists or indexFile is changed.", indexPath))
+	}
 
 	var hotReload *hotReloadHub
 	var stopHotReloadWatcher func()
 	if cfg.HotReload {
 		hotReload = newHotReloadHub()
-		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.AllowExtensions, hotReload.Publish)
+		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.HotReloadWatchExtensions, hotReload.HasSubscribers, hotReload.Publish)
 		if err != nil {
-			showError("jorro", fmt.Sprintf("Error starting hot reload watcher: %v", err))
-			return
+			showWarning("jorro", fmt.Sprintf("Hot reload is disabled:\n%v", err))
+			hotReload = nil
 		}
 	}
 
@@ -117,12 +123,15 @@ func main() {
 	}
 
 	url := "http://" + host + ":" + strconv.Itoa(port)
-	handler, err := newSecureHandler(root, cfg.AllowExtensions, hotReload)
+	handler, err := newSecureHandler(root, cfg.AllowExtensions, cfg.IndexFile, hotReload, htmlIncludeConfig{
+		Enabled:  cfg.HTMLInclude,
+		MaxDepth: cfg.HTMLIncludeMaxDepth,
+	})
 	if err != nil {
 		showError("jorro", fmt.Sprintf("Error building secure handler: %v", err))
 		return
 	}
-	server := newHTTPServer(handler, cfg.HotReload)
+	server := newHTTPServer(handler, hotReload != nil)
 
 	var stopOnce sync.Once
 	stopServer := func() {
@@ -323,6 +332,34 @@ func showError(title, text string) {
 	)
 }
 
+func showWarning(title, text string) {
+	titlePtr, _ := syscall.UTF16PtrFromString(title)
+	textPtr, _ := syscall.UTF16PtrFromString(text)
+	_, _, _ = procMessageBoxW.Call(
+		0,
+		uintptr(unsafe.Pointer(textPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
+		mbIconWarning,
+	)
+}
+
 func openBrowser(url string) {
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	candidates := []string{`C:\Windows\System32\rundll32.exe`}
+	if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+		envPath := filepath.Join(systemRoot, "System32", "rundll32.exe")
+		if !strings.EqualFold(envPath, candidates[0]) {
+			candidates = append(candidates, envPath)
+		}
+	}
+
+	for _, rundll32Path := range candidates {
+		info, err := os.Stat(rundll32Path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		_ = exec.Command(rundll32Path, "url.dll,FileProtocolHandler", url).Start()
+		return
+	}
+
+	showWarning("jorro", "Browser launcher not found in trusted system paths.")
 }

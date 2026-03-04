@@ -25,17 +25,21 @@ func main() {
 		fmt.Printf("Error loading config: %v\n", err)
 		return
 	}
+	if indexPath, ok := rootIndexFilePath(root, cfg.IndexFile); !ok {
+		fmt.Printf("Warning: configured index file not found: %s (GET / may return 404)\n", indexPath)
+	}
 
 	var hotReload *hotReloadHub
 	var stopHotReloadWatcher func()
 	if cfg.HotReload {
 		hotReload = newHotReloadHub()
-		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.AllowExtensions, hotReload.Publish)
+		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.HotReloadWatchExtensions, hotReload.HasSubscribers, hotReload.Publish)
 		if err != nil {
-			fmt.Printf("Error starting hot reload watcher: %v\n", err)
-			return
+			fmt.Printf("Warning: hot reload is disabled: %v\n", err)
+			hotReload = nil
+		} else {
+			defer stopHotReloadWatcher()
 		}
-		defer stopHotReloadWatcher()
 	}
 
 	ln, port, err := listenLocalhost(host, cfg.StartPort, 100)
@@ -46,12 +50,15 @@ func main() {
 	defer ln.Close()
 
 	url := "http://" + host + ":" + strconv.Itoa(port)
-	handler, err := newSecureHandler(root, cfg.AllowExtensions, hotReload)
+	handler, err := newSecureHandler(root, cfg.AllowExtensions, cfg.IndexFile, hotReload, htmlIncludeConfig{
+		Enabled:  cfg.HTMLInclude,
+		MaxDepth: cfg.HTMLIncludeMaxDepth,
+	})
 	if err != nil {
 		fmt.Printf("Error building secure handler: %v\n", err)
 		return
 	}
-	server := newHTTPServer(handler, cfg.HotReload)
+	server := newHTTPServer(handler, hotReload != nil)
 
 	fmt.Printf("Serving from: %s\n", root)
 	fmt.Printf("Listening on: %s\n", url)
@@ -72,13 +79,29 @@ func openBrowser(url string) {
 	var err error
 	switch runtime.GOOS {
 	case "windows":
-		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		err = fmt.Errorf("windows browser launch is not supported in this build")
 	case "darwin":
-		err = exec.Command("open", url).Start()
+		err = runTrustedOpen(url, []string{"/usr/bin/open"})
 	case "linux":
-		err = exec.Command("xdg-open", url).Start()
+		err = runTrustedOpen(url, []string{"/usr/bin/xdg-open", "/bin/xdg-open"})
+	default:
+		err = fmt.Errorf("unsupported runtime OS: %s", runtime.GOOS)
 	}
 	if err != nil {
 		fmt.Printf("Failed to open browser: %v\n", err)
 	}
+}
+
+func runTrustedOpen(url string, candidates []string) error {
+	for _, cmdPath := range candidates {
+		info, err := os.Stat(cmdPath)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		return exec.Command(cmdPath, url).Start()
+	}
+	return fmt.Errorf("trusted browser launcher was not found")
 }

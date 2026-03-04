@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 const (
-	defaultStartPort = 8080
-	configFileName   = "jorro-config.json"
+	defaultStartPort        = 8080
+	defaultIndexFile        = "index.html"
+	defaultHTMLInclude      = false
+	defaultHTMLIncludeDepth = 1
+	maxHTMLIncludeDepth     = 16
+	configFileName          = "jorro-config.json"
 )
 
 var defaultAllowExtensions = []string{
@@ -19,23 +25,39 @@ var defaultAllowExtensions = []string{
 	".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".wasm",
 }
 
+var defaultHotReloadWatchExtensions = []string{
+	".html", ".css", ".js",
+}
+
 type fileConfig struct {
-	Port            *int      `json:"port"`
-	AllowExtensions *[]string `json:"allowExtensions"`
-	HotReload       *bool     `json:"hotReload"`
+	Port                     *int      `json:"port"`
+	AllowExtensions          *[]string `json:"allowExtensions"`
+	IndexFile                *string   `json:"indexFile"`
+	HotReload                *bool     `json:"hotReload"`
+	HotReloadWatchExtensions *[]string `json:"hotReloadWatchExtensions"`
+	HTMLInclude              *bool     `json:"htmlInclude"`
+	HTMLIncludeMaxDepth      *int      `json:"htmlIncludeMaxDepth"`
 }
 
 type runtimeConfig struct {
-	StartPort       int
-	AllowExtensions map[string]struct{}
-	HotReload       bool
+	StartPort                int
+	AllowExtensions          map[string]struct{}
+	IndexFile                string
+	HotReload                bool
+	HotReloadWatchExtensions map[string]struct{}
+	HTMLInclude              bool
+	HTMLIncludeMaxDepth      int
 }
 
 func loadRuntimeConfig(root string) (runtimeConfig, error) {
 	cfg := runtimeConfig{
-		StartPort:       defaultStartPort,
-		AllowExtensions: normalizeExtensionsOrPanic(defaultAllowExtensions),
-		HotReload:       false,
+		StartPort:                defaultStartPort,
+		AllowExtensions:          normalizeExtensionsOrPanic(defaultAllowExtensions),
+		IndexFile:                defaultIndexFile,
+		HotReload:                false,
+		HotReloadWatchExtensions: normalizeExtensionsOrPanic(defaultHotReloadWatchExtensions),
+		HTMLInclude:              defaultHTMLInclude,
+		HTMLIncludeMaxDepth:      defaultHTMLIncludeDepth,
 	}
 
 	configPath := filepath.Join(root, configFileName)
@@ -47,8 +69,8 @@ func loadRuntimeConfig(root string) (runtimeConfig, error) {
 		return runtimeConfig{}, fmt.Errorf("read %s: %w", configPath, err)
 	}
 
-	var fc fileConfig
-	if err := json.Unmarshal(body, &fc); err != nil {
+	fc, err := parseFileConfig(body)
+	if err != nil {
 		return runtimeConfig{}, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 
@@ -66,11 +88,50 @@ func loadRuntimeConfig(root string) (runtimeConfig, error) {
 		}
 		cfg.AllowExtensions = normalized
 	}
+	if fc.IndexFile != nil {
+		normalized, err := normalizeIndexFile(*fc.IndexFile)
+		if err != nil {
+			return runtimeConfig{}, fmt.Errorf("%s: invalid indexFile: %w", configFileName, err)
+		}
+		cfg.IndexFile = normalized
+	}
 	if fc.HotReload != nil {
 		cfg.HotReload = *fc.HotReload
 	}
+	if fc.HotReloadWatchExtensions != nil {
+		normalized, err := normalizeExtensions(*fc.HotReloadWatchExtensions)
+		if err != nil {
+			return runtimeConfig{}, fmt.Errorf("%s: invalid hotReloadWatchExtensions: %w", configFileName, err)
+		}
+		cfg.HotReloadWatchExtensions = normalized
+	}
+	if fc.HTMLInclude != nil {
+		cfg.HTMLInclude = *fc.HTMLInclude
+	}
+	if fc.HTMLIncludeMaxDepth != nil {
+		if *fc.HTMLIncludeMaxDepth < 1 || *fc.HTMLIncludeMaxDepth > maxHTMLIncludeDepth {
+			return runtimeConfig{}, fmt.Errorf("%s: htmlIncludeMaxDepth must be between 1 and %d", configFileName, maxHTMLIncludeDepth)
+		}
+		cfg.HTMLIncludeMaxDepth = *fc.HTMLIncludeMaxDepth
+	}
 
 	return cfg, nil
+}
+
+func parseFileConfig(body []byte) (fileConfig, error) {
+	var fc fileConfig
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&fc); err != nil {
+		return fileConfig{}, err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fileConfig{}, fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return fileConfig{}, err
+	}
+	return fc, nil
 }
 
 func normalizeExtensionsOrPanic(list []string) map[string]struct{} {
@@ -97,4 +158,21 @@ func normalizeExtensions(list []string) (map[string]struct{}, error) {
 		result[ext] = struct{}{}
 	}
 	return result, nil
+}
+
+func normalizeIndexFile(raw string) (string, error) {
+	indexFile := strings.TrimSpace(raw)
+	if indexFile == "" {
+		return "", fmt.Errorf("empty file name is not allowed")
+	}
+	if strings.Contains(indexFile, "/") || strings.Contains(indexFile, "\\") {
+		return "", fmt.Errorf("path separators are not allowed")
+	}
+	if indexFile == "." || indexFile == ".." {
+		return "", fmt.Errorf("invalid file name %q", raw)
+	}
+	if strings.HasPrefix(indexFile, ".") {
+		return "", fmt.Errorf("hidden file is not allowed")
+	}
+	return indexFile, nil
 }

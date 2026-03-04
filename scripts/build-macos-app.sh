@@ -17,9 +17,16 @@ PREPARE_ICONS_SCRIPT="$ROOT_DIR/scripts/prepare-icons.sh"
 
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-"$PREPARE_ICONS_SCRIPT"
+if ! "$PREPARE_ICONS_SCRIPT"; then
+  if [[ -f "$ICONS_DIR/jorro.icns" ]]; then
+    echo "Warning: failed to regenerate .icns, reusing existing file: $ICONS_DIR/jorro.icns"
+  else
+    echo "Error: failed to generate .icns and no existing fallback is available."
+    exit 1
+  fi
+fi
 
-go build -o "$BIN_PATH" "$SRC_DIR"
+go build -trimpath -ldflags "-s -w" -o "$BIN_PATH" "$SRC_DIR"
 
 cat >"$LAUNCHER_SRC" <<'EOF'
 import Cocoa

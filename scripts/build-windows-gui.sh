@@ -33,7 +33,8 @@ else
 fi
 
 GOOS=windows GOARCH=amd64 go build \
-  -ldflags "-H=windowsgui" \
+  -trimpath \
+  -ldflags "-H=windowsgui -s -w" \
   -o "$DIST_DIR/jorro.exe" \
   "$SRC_DIR"
 

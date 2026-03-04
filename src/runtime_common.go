@@ -57,3 +57,16 @@ func rootDir(args []string) (string, error) {
 	}
 	return filepath.Dir(exePath), nil
 }
+
+func rootIndexFilePath(root, indexFile string) (string, bool) {
+	normalized, err := normalizeIndexFile(indexFile)
+	if err != nil {
+		return filepath.Join(root, indexFile), false
+	}
+	indexPath := filepath.Join(root, normalized)
+	info, err := os.Stat(indexPath)
+	if err != nil || info.IsDir() {
+		return indexPath, false
+	}
+	return indexPath, true
+}

@@ -52,8 +52,8 @@ if [[ "$ICON_MODE" == "all" || "$ICON_MODE" == "icns" ]]; then
   mkdir -p "$ICONSET_DIR"
   for size in 16 32 128 256 512; do
     size2x=$((size * 2))
-    magick "$BASE_PNG" -resize "${size}x${size}" "$ICONSET_DIR/icon_${size}x${size}.png"
-    magick "$BASE_PNG" -resize "${size2x}x${size2x}" "$ICONSET_DIR/icon_${size}x${size}@2x.png"
+    magick "$BASE_PNG" -resize "${size}x${size}" "PNG32:$ICONSET_DIR/icon_${size}x${size}.png"
+    magick "$BASE_PNG" -resize "${size2x}x${size2x}" "PNG32:$ICONSET_DIR/icon_${size}x${size}@2x.png"
   done
   iconutil -c icns "$ICONSET_DIR" -o "$ICNS_OUT"
   echo "Generated: $ICNS_OUT"
