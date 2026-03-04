@@ -105,14 +105,16 @@ func main() {
 		showWarning("jorro", fmt.Sprintf("Configured index file was not found:\n%s\n\nAccessing / may return 404 until it exists or indexFile is changed.", indexPath))
 	}
 
-	var hotReload *hotReloadHub
+	var devEvents *hotReloadHub
 	var stopHotReloadWatcher func()
+	if cfg.HotReload || cfg.DevConsoleErrors {
+		devEvents = newHotReloadHub()
+	}
 	if cfg.HotReload {
-		hotReload = newHotReloadHub()
-		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.HotReloadWatchExtensions, hotReload.HasSubscribers, hotReload.Publish)
+		stopHotReloadWatcher, err = startHotReloadWatcher(root, cfg.HotReloadWatchExtensions, devEvents.HasSubscribers, devEvents.PublishReload)
 		if err != nil {
 			showWarning("jorro", fmt.Sprintf("Hot reload is disabled:\n%v", err))
-			hotReload = nil
+			cfg.HotReload = false
 		}
 	}
 
@@ -123,7 +125,7 @@ func main() {
 	}
 
 	url := "http://" + host + ":" + strconv.Itoa(port)
-	handler, err := newSecureHandler(root, cfg.AllowExtensions, cfg.IndexFile, hotReload, htmlIncludeConfig{
+	handler, err := newSecureHandler(root, cfg.AllowExtensions, cfg.IndexFile, devEvents, cfg.DevConsoleErrors, htmlIncludeConfig{
 		Enabled:  cfg.HTMLInclude,
 		MaxDepth: cfg.HTMLIncludeMaxDepth,
 	})
@@ -131,7 +133,7 @@ func main() {
 		showError("jorro", fmt.Sprintf("Error building secure handler: %v", err))
 		return
 	}
-	server := newHTTPServer(handler, hotReload != nil)
+	server := newHTTPServer(handler, devEvents != nil)
 
 	var stopOnce sync.Once
 	stopServer := func() {

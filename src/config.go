@@ -34,6 +34,7 @@ type fileConfig struct {
 	AllowExtensions          *[]string `json:"allowExtensions"`
 	IndexFile                *string   `json:"indexFile"`
 	HotReload                *bool     `json:"hotReload"`
+	DevConsoleErrors         *bool     `json:"devConsoleErrors"`
 	HotReloadWatchExtensions *[]string `json:"hotReloadWatchExtensions"`
 	HTMLInclude              *bool     `json:"htmlInclude"`
 	HTMLIncludeMaxDepth      *int      `json:"htmlIncludeMaxDepth"`
@@ -44,6 +45,7 @@ type runtimeConfig struct {
 	AllowExtensions          map[string]struct{}
 	IndexFile                string
 	HotReload                bool
+	DevConsoleErrors         bool
 	HotReloadWatchExtensions map[string]struct{}
 	HTMLInclude              bool
 	HTMLIncludeMaxDepth      int
@@ -55,6 +57,7 @@ func loadRuntimeConfig(root string) (runtimeConfig, error) {
 		AllowExtensions:          normalizeExtensionsOrPanic(defaultAllowExtensions),
 		IndexFile:                defaultIndexFile,
 		HotReload:                false,
+		DevConsoleErrors:         false,
 		HotReloadWatchExtensions: normalizeExtensionsOrPanic(defaultHotReloadWatchExtensions),
 		HTMLInclude:              defaultHTMLInclude,
 		HTMLIncludeMaxDepth:      defaultHTMLIncludeDepth,
@@ -97,6 +100,9 @@ func loadRuntimeConfig(root string) (runtimeConfig, error) {
 	}
 	if fc.HotReload != nil {
 		cfg.HotReload = *fc.HotReload
+	}
+	if fc.DevConsoleErrors != nil {
+		cfg.DevConsoleErrors = *fc.DevConsoleErrors
 	}
 	if fc.HotReloadWatchExtensions != nil {
 		normalized, err := normalizeExtensions(*fc.HotReloadWatchExtensions)

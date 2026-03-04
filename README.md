@@ -42,6 +42,7 @@ https://github.com/lizard-isana/jorro/releases/
   "indexFile": "index.html",
   "allowExtensions": [".html", ".css", ".js", ".md", ".json"],
   "hotReload": false,
+  "devConsoleErrors": false,
   "hotReloadWatchExtensions": [".html", ".css", ".js"],
   "htmlInclude": false,
   "htmlIncludeMaxDepth": 1
@@ -57,6 +58,7 @@ https://github.com/lizard-isana/jorro/releases/
 - `allowExtensions` が存在する: その拡張子のみ配信
 - `allowExtensions` が存在しない: デフォルト拡張子を使用
 - `hotReload: true`: HTMLに開発用スクリプトを動的挿入し、変更時に自動リロード
+- `devConsoleErrors: true`: HTMLに同じ開発用スクリプトを動的挿入し、サーバ側エラーをブラウザコンソールへ表示
 - `hotReloadWatchExtensions` が存在する: ホットリロード変更検知の拡張子を上書き（デフォルト: `.html/.css/.js`）
 - ホットリロードは短いデバウンスを行い、保存直後の連続リロードを抑制
 - ネットワークドライブ/UNC パスなどでは、ホットリロードが自動的に無効化される場合がある

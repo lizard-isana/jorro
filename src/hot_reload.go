@@ -21,17 +21,22 @@ type fileFingerprint struct {
 
 type hotReloadHub struct {
 	mu          sync.Mutex
-	subscribers map[chan struct{}]struct{}
+	subscribers map[chan devEvent]struct{}
+}
+
+type devEvent struct {
+	Type    string
+	Payload string
 }
 
 func newHotReloadHub() *hotReloadHub {
 	return &hotReloadHub{
-		subscribers: map[chan struct{}]struct{}{},
+		subscribers: map[chan devEvent]struct{}{},
 	}
 }
 
-func (h *hotReloadHub) Subscribe(ctx context.Context) <-chan struct{} {
-	ch := make(chan struct{}, 1)
+func (h *hotReloadHub) Subscribe(ctx context.Context) <-chan devEvent {
+	ch := make(chan devEvent, 8)
 
 	h.mu.Lock()
 	h.subscribers[ch] = struct{}{}
@@ -51,10 +56,30 @@ func (h *hotReloadHub) Subscribe(ctx context.Context) <-chan struct{} {
 }
 
 func (h *hotReloadHub) Publish() {
+	h.PublishReload()
+}
+
+func (h *hotReloadHub) PublishReload() {
 	h.mu.Lock()
 	for ch := range h.subscribers {
 		select {
-		case ch <- struct{}{}:
+		case ch <- devEvent{Type: "reload", Payload: "changed"}:
+		default:
+		}
+	}
+	h.mu.Unlock()
+}
+
+func (h *hotReloadHub) PublishServerError(message string) {
+	msg := sanitizeServerErrorMessage(message)
+	if msg == "" {
+		return
+	}
+
+	h.mu.Lock()
+	for ch := range h.subscribers {
+		select {
+		case ch <- devEvent{Type: "server_error", Payload: msg}:
 		default:
 		}
 	}
@@ -65,6 +90,17 @@ func (h *hotReloadHub) HasSubscribers() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subscribers) > 0
+}
+
+func sanitizeServerErrorMessage(raw string) string {
+	msg := strings.TrimSpace(raw)
+	if msg == "" {
+		return ""
+	}
+	msg = strings.ReplaceAll(msg, "\r", " ")
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	msg = strings.ReplaceAll(msg, "\x00", "")
+	return strings.Join(strings.Fields(msg), " ")
 }
 
 func startHotReloadWatcher(root string, watchExtensions map[string]struct{}, hasSubscribers func() bool, onChange func()) (func(), error) {

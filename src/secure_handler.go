@@ -21,7 +21,7 @@ type htmlIncludeConfig struct {
 	MaxDepth int
 }
 
-func newSecureHandler(root string, allowExtensions map[string]struct{}, indexFile string, hotReload *hotReloadHub, includeCfg htmlIncludeConfig) (http.Handler, error) {
+func newSecureHandler(root string, allowExtensions map[string]struct{}, indexFile string, devEvents *hotReloadHub, devConsoleErrors bool, includeCfg htmlIncludeConfig) (http.Handler, error) {
 	baseRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -57,8 +57,8 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, indexFil
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if hotReload != nil && r.URL.Path == hotReloadEventsPath {
-			serveHotReloadEvents(w, r, hotReload)
+		if devEvents != nil && r.URL.Path == hotReloadEventsPath {
+			serveHotReloadEvents(w, r, devEvents)
 			return
 		}
 
@@ -122,7 +122,7 @@ func newSecureHandler(root string, allowExtensions map[string]struct{}, indexFil
 			return
 		}
 		if strings.EqualFold(filepath.Ext(resolvedPath), ".html") {
-			serveHTMLWithTransforms(w, r, resolvedPath, baseRoot, allowExtensions, hotReload != nil, includeCfg)
+			serveHTMLWithTransforms(w, r, resolvedPath, baseRoot, allowExtensions, devEvents, devConsoleErrors, includeCfg)
 			return
 		}
 
@@ -160,8 +160,15 @@ func serveHotReloadEvents(w http.ResponseWriter, r *http.Request, hub *hotReload
 		select {
 		case <-r.Context().Done():
 			return
-		case <-updates:
-			_, _ = w.Write([]byte("event: reload\ndata: changed\n\n"))
+		case event, ok := <-updates:
+			if !ok {
+				return
+			}
+			payload := sanitizeSSEData(event.Payload)
+			if payload == "" {
+				payload = "changed"
+			}
+			_, _ = w.Write([]byte("event: " + event.Type + "\ndata: " + payload + "\n\n"))
 			flusher.Flush()
 		case <-keepAlive.C:
 			_, _ = w.Write([]byte(": ping\n\n"))
@@ -170,17 +177,29 @@ func serveHotReloadEvents(w http.ResponseWriter, r *http.Request, hub *hotReload
 	}
 }
 
-func serveHTMLWithTransforms(w http.ResponseWriter, r *http.Request, filePath, baseRoot string, allowExtensions map[string]struct{}, hotReload bool, includeCfg htmlIncludeConfig) {
+func sanitizeSSEData(raw string) string {
+	clean := strings.TrimSpace(raw)
+	clean = strings.ReplaceAll(clean, "\r", " ")
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	clean = strings.Join(strings.Fields(clean), " ")
+	return clean
+}
+
+func serveHTMLWithTransforms(w http.ResponseWriter, r *http.Request, filePath, baseRoot string, allowExtensions map[string]struct{}, devEvents *hotReloadHub, devConsoleErrors bool, includeCfg htmlIncludeConfig) {
 	body, err := os.ReadFile(filePath)
 	if err != nil {
 		serveNotFoundPage(w, r, baseRoot)
 		return
 	}
 	if includeCfg.Enabled {
-		body = renderHTMLIncludes(body, filePath, baseRoot, allowExtensions, includeCfg.MaxDepth)
+		var onIncludeError func(string)
+		if devConsoleErrors && devEvents != nil {
+			onIncludeError = devEvents.PublishServerError
+		}
+		body = renderHTMLIncludes(body, filePath, baseRoot, allowExtensions, includeCfg.MaxDepth, onIncludeError)
 	}
-	if hotReload {
-		body = injectHotReloadScript(body)
+	if devEvents != nil {
+		body = injectDevEventsScript(body)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -192,14 +211,14 @@ func serveHTMLWithTransforms(w http.ResponseWriter, r *http.Request, filePath, b
 	_, _ = w.Write(body)
 }
 
-func renderHTMLIncludes(body []byte, filePath, baseRoot string, allowExtensions map[string]struct{}, maxDepth int) []byte {
+func renderHTMLIncludes(body []byte, filePath, baseRoot string, allowExtensions map[string]struct{}, maxDepth int, onError func(string)) []byte {
 	stack := map[string]struct{}{
 		filePath: {},
 	}
-	return renderHTMLIncludesRecursive(body, filePath, baseRoot, allowExtensions, maxDepth, stack)
+	return renderHTMLIncludesRecursive(body, filePath, baseRoot, allowExtensions, maxDepth, stack, onError)
 }
 
-func renderHTMLIncludesRecursive(body []byte, parentFilePath, baseRoot string, allowExtensions map[string]struct{}, remainingDepth int, stack map[string]struct{}) []byte {
+func renderHTMLIncludesRecursive(body []byte, parentFilePath, baseRoot string, allowExtensions map[string]struct{}, remainingDepth int, stack map[string]struct{}, onError func(string)) []byte {
 	matches := htmlIncludeDirectivePattern.FindAllSubmatchIndex(body, -1)
 	if len(matches) == 0 {
 		return body
@@ -213,25 +232,37 @@ func renderHTMLIncludesRecursive(body []byte, parentFilePath, baseRoot string, a
 		includePath := strings.TrimSpace(string(body[m[4]:m[5]]))
 
 		if remainingDepth < 1 {
-			out = append(out, includeErrorComment("max include depth exceeded")...)
+			msg := "max include depth exceeded"
+			out = append(out, includeErrorComment(msg)...)
+			if onError != nil {
+				onError(msg)
+			}
 			last = m[1]
 			continue
 		}
 
 		includeBody, resolvedIncludePath, err := readIncludeFile(includeKind, includePath, parentFilePath, baseRoot, allowExtensions)
 		if err != nil {
-			out = append(out, includeErrorComment(err.Error())...)
+			msg := err.Error()
+			out = append(out, includeErrorComment(msg)...)
+			if onError != nil {
+				onError(msg)
+			}
 			last = m[1]
 			continue
 		}
 		if _, exists := stack[resolvedIncludePath]; exists {
-			out = append(out, includeErrorComment("cyclic include detected")...)
+			msg := "cyclic include detected"
+			out = append(out, includeErrorComment(msg)...)
+			if onError != nil {
+				onError(msg)
+			}
 			last = m[1]
 			continue
 		}
 
 		stack[resolvedIncludePath] = struct{}{}
-		includeBody = renderHTMLIncludesRecursive(includeBody, resolvedIncludePath, baseRoot, allowExtensions, remainingDepth-1, stack)
+		includeBody = renderHTMLIncludesRecursive(includeBody, resolvedIncludePath, baseRoot, allowExtensions, remainingDepth-1, stack, onError)
 		delete(stack, resolvedIncludePath)
 
 		out = append(out, includeBody...)
@@ -339,12 +370,12 @@ func serveNotFoundPage(w http.ResponseWriter, r *http.Request, baseRoot string) 
 	_, _ = w.Write(body)
 }
 
-func injectHotReloadScript(html []byte) []byte {
-	if bytes.Contains(html, []byte("data-jorro-hot-reload")) {
+func injectDevEventsScript(html []byte) []byte {
+	if bytes.Contains(html, []byte("data-jorro-dev-events")) {
 		return html
 	}
 
-	snippet := []byte(`<script data-jorro-hot-reload>(function(){if(globalThis.__JORRO_HOT_RELOAD_ACTIVE__){return;}Object.defineProperty(globalThis,"__JORRO_HOT_RELOAD_ACTIVE__",{value:true,writable:false,configurable:false});var sse=new EventSource("/__jorro/events");sse.addEventListener("reload",function(){location.reload();});})();</script>`)
+	snippet := []byte(`<script data-jorro-dev-events>(function(){if(globalThis.__JORRO_DEV_EVENTS_ACTIVE__){return;}Object.defineProperty(globalThis,"__JORRO_DEV_EVENTS_ACTIVE__",{value:true,writable:false,configurable:false});var sse=new EventSource("/__jorro/events");sse.addEventListener("reload",function(){location.reload();});sse.addEventListener("server_error",function(e){if(e&&typeof e.data==="string"&&e.data){console.error("[jorro]",e.data);}});})();</script>`)
 	lower := bytes.ToLower(html)
 	closeBody := []byte("</body>")
 	if idx := bytes.LastIndex(lower, closeBody); idx >= 0 {

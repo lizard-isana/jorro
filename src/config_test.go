@@ -21,6 +21,9 @@ func TestLoadRuntimeConfig_DefaultWhenFileMissing(t *testing.T) {
 	if cfg.HotReload {
 		t.Fatalf("HotReload=%v, want false", cfg.HotReload)
 	}
+	if cfg.DevConsoleErrors {
+		t.Fatalf("DevConsoleErrors=%v, want false", cfg.DevConsoleErrors)
+	}
 	if cfg.IndexFile != defaultIndexFile {
 		t.Fatalf("IndexFile=%q, want %q", cfg.IndexFile, defaultIndexFile)
 	}
@@ -100,6 +103,23 @@ func TestLoadRuntimeConfig_HotReloadWhenPresent(t *testing.T) {
 	}
 	if !cfg.HotReload {
 		t.Fatalf("HotReload=%v, want true", cfg.HotReload)
+	}
+}
+
+func TestLoadRuntimeConfig_DevConsoleErrorsWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, configFileName)
+	body := `{"devConsoleErrors":true}`
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := loadRuntimeConfig(dir)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error: %v", err)
+	}
+	if !cfg.DevConsoleErrors {
+		t.Fatalf("DevConsoleErrors=%v, want true", cfg.DevConsoleErrors)
 	}
 }
 

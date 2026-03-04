@@ -214,10 +214,10 @@ func TestSecureHandler_InjectsHotReloadScriptOnce(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "data-jorro-hot-reload") {
-		t.Fatalf("expected hot reload script to be injected")
+	if !strings.Contains(body, "data-jorro-dev-events") {
+		t.Fatalf("expected dev events script to be injected")
 	}
-	if got := strings.Count(body, "data-jorro-hot-reload"); got != 1 {
+	if got := strings.Count(body, "data-jorro-dev-events"); got != 1 {
 		t.Fatalf("injected marker count=%d, want 1", got)
 	}
 }
@@ -402,7 +402,7 @@ func TestSecureHandler_HotReloadEventsStream(t *testing.T) {
 	// Give the handler time to subscribe, then publish a few times to avoid races.
 	time.Sleep(50 * time.Millisecond)
 	for i := 0; i < 3; i++ {
-		hub.Publish()
+		hub.PublishReload()
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -419,6 +419,48 @@ func TestSecureHandler_HotReloadEventsStream(t *testing.T) {
 	}
 }
 
+func TestSecureHandler_ServerErrorEventsStream(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "index.html"), `<html><body><!--#include file="partials/missing.html"--></body></html>`)
+
+	handler, _ := mustSecureHandlerWithIncludeAndDevErrors(t, root, []string{".html"}, defaultIndexFile, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eventsReq := httptest.NewRequest(http.MethodGet, hotReloadEventsPath, nil).WithContext(ctx)
+	eventsRec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(eventsRec, eventsReq)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/index.html", nil)
+	pageRec := httptest.NewRecorder()
+	handler.ServeHTTP(pageRec, pageReq)
+	if pageRec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", pageRec.Code, http.StatusOK)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(120 * time.Millisecond):
+		cancel()
+		<-done
+	}
+
+	body := eventsRec.Body.String()
+	if !strings.Contains(body, "event: server_error") {
+		t.Fatalf("expected server_error event, got body=%q", body)
+	}
+	if !strings.Contains(body, "include not found") {
+		t.Fatalf("expected include error payload, got body=%q", body)
+	}
+}
+
 func mustSecureHandler(t *testing.T, root string, extensions []string) http.Handler {
 	return mustSecureHandlerWithIndex(t, root, extensions, defaultIndexFile)
 }
@@ -430,7 +472,7 @@ func mustSecureHandlerWithIndex(t *testing.T, root string, extensions []string, 
 	if err != nil {
 		t.Fatalf("normalizeExtensions() error: %v", err)
 	}
-	handler, err := newSecureHandler(root, allow, indexFile, nil, htmlIncludeConfig{})
+	handler, err := newSecureHandler(root, allow, indexFile, nil, false, htmlIncludeConfig{})
 	if err != nil {
 		t.Fatalf("newSecureHandler() error: %v", err)
 	}
@@ -445,7 +487,7 @@ func mustSecureHandlerWithHot(t *testing.T, root string, extensions []string) (h
 		t.Fatalf("normalizeExtensions() error: %v", err)
 	}
 	hub := newHotReloadHub()
-	handler, err := newSecureHandler(root, allow, defaultIndexFile, hub, htmlIncludeConfig{})
+	handler, err := newSecureHandler(root, allow, defaultIndexFile, hub, false, htmlIncludeConfig{})
 	if err != nil {
 		t.Fatalf("newSecureHandler() error: %v", err)
 	}
@@ -459,7 +501,7 @@ func mustSecureHandlerWithInclude(t *testing.T, root string, extensions []string
 	if err != nil {
 		t.Fatalf("normalizeExtensions() error: %v", err)
 	}
-	handler, err := newSecureHandler(root, allow, indexFile, nil, htmlIncludeConfig{
+	handler, err := newSecureHandler(root, allow, indexFile, nil, false, htmlIncludeConfig{
 		Enabled:  true,
 		MaxDepth: maxDepth,
 	})
@@ -467,6 +509,24 @@ func mustSecureHandlerWithInclude(t *testing.T, root string, extensions []string
 		t.Fatalf("newSecureHandler() error: %v", err)
 	}
 	return handler
+}
+
+func mustSecureHandlerWithIncludeAndDevErrors(t *testing.T, root string, extensions []string, indexFile string, maxDepth int) (http.Handler, *hotReloadHub) {
+	t.Helper()
+
+	allow, err := normalizeExtensions(extensions)
+	if err != nil {
+		t.Fatalf("normalizeExtensions() error: %v", err)
+	}
+	hub := newHotReloadHub()
+	handler, err := newSecureHandler(root, allow, indexFile, hub, true, htmlIncludeConfig{
+		Enabled:  true,
+		MaxDepth: maxDepth,
+	})
+	if err != nil {
+		t.Fatalf("newSecureHandler() error: %v", err)
+	}
+	return handler, hub
 }
 
 func writeTestFile(t *testing.T, path, body string) {
