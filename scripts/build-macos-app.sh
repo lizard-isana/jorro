@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/src"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/jorro.app"
+DMG_PATH="$DIST_DIR/jorro.dmg"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -276,3 +277,12 @@ cat >"$PLIST_PATH" <<'EOF'
 EOF
 
 echo "Built: $APP_DIR"
+
+if ! command -v hdiutil >/dev/null 2>&1; then
+  echo "Warning: hdiutil not found. Skipped DMG packaging."
+  exit 0
+fi
+
+rm -f "$DMG_PATH"
+hdiutil create -volname "jorro" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+echo "Built: $DMG_PATH"

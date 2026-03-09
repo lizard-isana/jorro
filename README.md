@@ -125,6 +125,8 @@ macOSアプリ版:
 ./scripts/build-macos-app.sh
 ```
 
+出力: `dist/jorro.app`, `dist/jorro.dmg`
+
 Windows GUI版:
 
 ```bash
